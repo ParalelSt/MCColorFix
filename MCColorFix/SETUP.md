@@ -53,12 +53,51 @@ you're not sure which OS you're on).
    grant it in System Settings → Privacy & Security → Screen Recording, then
    relaunch the app (macOS requires a relaunch after granting this permission)
 4. Click the eye icon in the menu bar
-5. Click "Find Minecraft Window", then click the window name that appears
+5. Pick your game window from the list. Windows are ranked with the most
+   likely Minecraft window first; each row shows the owning app and pixel
+   size so similarly-named windows stay distinguishable. If your window
+   isn't in the list, click **Show all windows** and pick it manually.
 6. A color-corrected overlay window will appear directly on top of Minecraft,
    tracking its position/size automatically
 
+The overlay hides itself whenever Minecraft is not the frontmost app, and
+comes back when you switch to it, so it does not cover your other windows.
+
 Click "Stop Overlay" from the menu bar to remove it and interact with
 Minecraft normally again.
+
+## Troubleshooting
+
+### "No Minecraft window found" / the window list is empty
+
+Almost always a Screen Recording permission problem rather than an actual
+missing window. The app tells the two apart and will say which it is.
+
+**If it says the app is in a temporary randomized location:** macOS applies
+"app translocation" to quarantined, unsigned apps opened from Downloads,
+running them from a path that changes on every launch. Permission can never
+persist for such a path, and the prompt may never appear at all. Quit the
+app, move `MCColorFix.app` into `/Applications` **in Finder** (that is what
+clears the quarantine flag), and open it from there.
+
+**If it asks for Screen Recording permission:** grant it, then quit and
+reopen the app — macOS only applies the change after a relaunch.
+
+Because release builds are ad-hoc signed, macOS identifies them by code
+hash rather than a stable developer identity. Every new build therefore
+counts as a different app and needs permission granted again, even though
+the old entry still shows as enabled in System Settings. Toggling the entry
+off and on, or removing it with `-` and re-granting, fixes it.
+
+### My launcher's window isn't detected
+
+Click **Show all windows** and pick it manually. Scoring only ranks the
+list, it never removes anything from it, so a window the heuristic scores
+badly is still selectable.
+
+Windows that are not plausible capture targets at all are excluded before
+ranking: those on a non-zero window level (menus, panels, floating chrome)
+and anything smaller than 200x150.
 
 ## Known limitations
 
@@ -73,3 +112,6 @@ Minecraft normally again.
 - This does **not** click through to Minecraft — you're interacting directly
   with the overlay window itself, which is intentional and avoids any of the
   fragile always-on-top-transparent-passthrough tricks.
+- The overlay tracks which *app* is frontmost, not which window. If Minecraft
+  is frontmost, the overlay shows; it does not additionally detect the game
+  window being covered by another window of the same app.

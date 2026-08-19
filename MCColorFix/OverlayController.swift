@@ -27,6 +27,12 @@ final class OverlayController: NSObject, ObservableObject {
     private var overlayView: OverlayImageView?
     private var trackingTimer: Timer?
     private var targetWindowID: CGWindowID?
+    /// PID of the app owning the captured window, used to show/hide the
+    /// overlay in step with that app's focus.
+    private var targetPID: pid_t?
+    private var activationObserver: NSObjectProtocol?
+    private var deactivationObserver: NSObjectProtocol?
+
     // MARK: Permissions
 
     /// Short version string shown in the UI, so it is always obvious which
@@ -142,6 +148,7 @@ final class OverlayController: NSObject, ObservableObject {
                 isRunning = true
                 statusText = "Running — overlay active on \(target.displayName)"
                 startWindowTracking(windowID: target.scWindow.windowID)
+                startFocusTracking(pid: target.scWindow.owningApplication?.processID)
             } catch {
                 statusText = "Failed to start: \(error.localizedDescription)"
             }
@@ -151,6 +158,7 @@ final class OverlayController: NSObject, ObservableObject {
     func stop() {
         trackingTimer?.invalidate()
         trackingTimer = nil
+        stopFocusTracking()
         // Detach the stream *before* suspending. Awaiting first would let a
         // start() that happens during the suspension have its new stream
         // nulled out by this teardown.
@@ -161,6 +169,7 @@ final class OverlayController: NSObject, ObservableObject {
         overlayWindow?.orderOut(nil)
         overlayWindow = nil
         overlayView = nil
+        targetPID = nil
         isRunning = false
         statusText = "Stopped"
     }
@@ -219,6 +228,74 @@ final class OverlayController: NSObject, ObservableObject {
         window.orderFrontRegardless()
 
         self.overlayWindow = window
+    }
+
+    // MARK: Focus tracking (only cover Minecraft, not everything else)
+
+    /// A `.floating` window sits above every normal window on its Space, so a
+    /// static overlay hides whatever you switch to. Tying its visibility to the
+    /// target app's focus makes it behave like part of that app instead.
+    private func startFocusTracking(pid: pid_t?) {
+        targetPID = pid
+        stopFocusTracking()
+        guard pid != nil else {
+            // Without an owning PID there is nothing to follow, so the overlay
+            // stays permanently on top. Say so instead of quietly not doing
+            // what the app claims to do.
+            statusText += " (overlay stays on top: owning app could not be identified)"
+            return
+        }
+
+        let center = NSWorkspace.shared.notificationCenter
+        activationObserver = center.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let frontPID = app?.processIdentifier
+            guard let self else { return }
+            Task { @MainActor in self.syncOverlayVisibility(frontmostPID: frontPID) }
+        }
+        // Covers the app quitting or being hidden, which does not always come
+        // through as another app activating.
+        deactivationObserver = center.addObserver(
+            forName: NSWorkspace.didDeactivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.syncOverlayVisibility(
+                    frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier
+                )
+            }
+        }
+
+        syncOverlayVisibility(frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+    }
+
+    private func stopFocusTracking() {
+        let center = NSWorkspace.shared.notificationCenter
+        if let activationObserver { center.removeObserver(activationObserver) }
+        if let deactivationObserver { center.removeObserver(deactivationObserver) }
+        activationObserver = nil
+        deactivationObserver = nil
+    }
+
+    private func syncOverlayVisibility(frontmostPID: pid_t?) {
+        guard let overlayWindow, let targetPID else { return }
+        // Opening our own menu bar panel makes this app frontmost. Leave the
+        // overlay exactly as it was rather than forcing it visible — forcing
+        // it would drag the overlay on top of whatever app the user was
+        // actually using when they opened the panel.
+        if frontmostPID == ProcessInfo.processInfo.processIdentifier { return }
+
+        if frontmostPID == targetPID {
+            if !overlayWindow.isVisible { overlayWindow.orderFrontRegardless() }
+        } else if overlayWindow.isVisible {
+            overlayWindow.orderOut(nil)
+        }
     }
 
     // MARK: Window tracking (follow Minecraft if moved/resized)
