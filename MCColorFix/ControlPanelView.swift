@@ -26,13 +26,32 @@ struct ControlPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Minecraft Color Fix")
-                .font(.headline)
+            HStack(alignment: .firstTextBaseline) {
+                Text("Minecraft Color Fix")
+                    .font(.headline)
+                Spacer()
+                // Makes it unambiguous which build is running — several copies
+                // of this app tend to accumulate in Downloads.
+                Text(OverlayController.versionString)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 
             Text(overlay.statusText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if overlay.needsScreenRecordingPermission {
+                Button("Open Screen Recording Settings") {
+                    overlay.openScreenRecordingSettings()
+                }
+            }
+            if overlay.isTranslocated {
+                Button("Reveal app in Finder") {
+                    overlay.revealAppInFinder()
+                }
+            }
 
             Divider()
 

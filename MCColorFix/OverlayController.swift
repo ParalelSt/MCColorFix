@@ -12,6 +12,10 @@ final class OverlayController: NSObject, ObservableObject {
     @Published var allWindows: [TargetWindow] = []
     /// True when the last lookup failed because Screen Recording is not granted.
     @Published var needsScreenRecordingPermission = false
+    /// True when the app is running from a translocated (randomized) path,
+    /// which makes granting Screen Recording permission impossible.
+    @Published var isTranslocated = OverlayController.isTranslocated
+
     /// Windows the heuristics think are the game. Empty is a meaningful state:
     /// it means "we saw windows but none looked like Minecraft", which is when
     /// the UI should offer the full list instead.
@@ -25,15 +29,65 @@ final class OverlayController: NSObject, ObservableObject {
     private var targetWindowID: CGWindowID?
     // MARK: Permissions
 
-    func requestScreenRecordingPermissionIfNeeded() {
-        Task {
-            // Triggers the system permission prompt if not already granted.
-            if case .permissionDenied = await WindowFinder.findWindows() {
-                needsScreenRecordingPermission = true
-                statusText = Self.permissionMessage
-            }
-        }
+    /// Short version string shown in the UI, so it is always obvious which
+    /// build is actually running.
+    static var versionString: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "v\(short) (\(build))"
     }
+
+    /// macOS runs quarantined, unsigned apps from a randomized read-only path
+    /// ("app translocation"). Because that path changes on every launch, TCC
+    /// can never persist a Screen Recording grant for it — the app silently
+    /// stays blind to every window, and the permission prompt may never appear
+    /// at all. Moving the app out of Downloads in Finder clears the quarantine
+    /// flag and stops translocation.
+    static var isTranslocated: Bool {
+        Bundle.main.bundlePath.contains("/AppTranslocation/")
+    }
+
+    func requestScreenRecordingPermissionIfNeeded() {
+        // CGPreflightScreenCaptureAccess reports the current grant without
+        // prompting; CGRequestScreenCaptureAccess raises the system prompt
+        // explicitly. Relying on SCShareableContent to prompt implicitly is
+        // unreliable for a menu-bar-only (.accessory) app, which is how this
+        // app can end up permanently unable to see windows having never shown
+        // the user a prompt to accept.
+        isTranslocated = Self.isTranslocated
+
+        // Translocation is reported as a warning rather than a hard stop:
+        // if capture happens to work anyway, the app stays fully usable.
+        guard !CGPreflightScreenCaptureAccess() else {
+            needsScreenRecordingPermission = false
+            return
+        }
+
+        needsScreenRecordingPermission = true
+        statusText = isTranslocated ? Self.translocationMessage : Self.permissionMessage
+        // Returns false when the prompt was already answered (or dismissed) in
+        // a previous run; macOS only ever shows it once per app.
+        _ = CGRequestScreenCaptureAccess()
+    }
+
+    /// Opens Finder at the real app bundle so the user can drag it out of
+    /// Downloads, which is what stops translocation.
+    func revealAppInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+    }
+
+    func openScreenRecordingSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        NSWorkspace.shared.open(url)
+    }
+
+    static let translocationMessage = """
+        This app is running from a temporary randomized location, so macOS \
+        cannot remember Screen Recording permission for it. Quit the app, move \
+        MCColorFix.app to your Applications folder in Finder, then open it from \
+        there.
+        """
 
     private static let permissionMessage = """
         Screen Recording permission is required. Enable MCColorFix in System \
@@ -49,7 +103,7 @@ final class OverlayController: NSObject, ObservableObject {
             case .permissionDenied:
                 needsScreenRecordingPermission = true
                 allWindows = []
-                statusText = Self.permissionMessage
+                statusText = Self.isTranslocated ? Self.translocationMessage : Self.permissionMessage
 
             case .failed(let message):
                 needsScreenRecordingPermission = false
