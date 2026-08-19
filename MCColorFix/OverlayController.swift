@@ -8,7 +8,14 @@ final class OverlayController: NSObject, ObservableObject {
 
     @Published var isRunning = false
     @Published var statusText = "Not running"
-    @Published var availableWindows: [TargetWindow] = []
+    /// Every capturable window, best guess first.
+    @Published var allWindows: [TargetWindow] = []
+    /// True when the last lookup failed because Screen Recording is not granted.
+    @Published var needsScreenRecordingPermission = false
+    /// Windows the heuristics think are the game. Empty is a meaningful state:
+    /// it means "we saw windows but none looked like Minecraft", which is when
+    /// the UI should offer the full list instead.
+    var likelyWindows: [TargetWindow] { allWindows.filter(\.isLikelyMinecraft) }
 
     private var stream: SCStream?
     private var streamOutput: CaptureOutput?
@@ -16,30 +23,53 @@ final class OverlayController: NSObject, ObservableObject {
     private var overlayView: OverlayImageView?
     private var trackingTimer: Timer?
     private var targetWindowID: CGWindowID?
-
     // MARK: Permissions
 
     func requestScreenRecordingPermissionIfNeeded() {
         Task {
-            do {
-                // Triggers the system permission prompt if not already granted.
-                _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            } catch {
-                statusText = "Screen Recording permission needed. Enable it in System Settings > Privacy & Security > Screen Recording, then relaunch."
+            // Triggers the system permission prompt if not already granted.
+            if case .permissionDenied = await WindowFinder.findWindows() {
+                needsScreenRecordingPermission = true
+                statusText = Self.permissionMessage
             }
         }
     }
+
+    private static let permissionMessage = """
+        Screen Recording permission is required. Enable MCColorFix in System \
+        Settings > Privacy & Security > Screen Recording, then quit and reopen \
+        this app — macOS only applies the change after a relaunch.
+        """
 
     // MARK: Discovery
 
     func refreshWindowList() {
         Task {
-            let windows = await WindowFinder.findMinecraftWindows()
-            self.availableWindows = windows
-            if windows.isEmpty {
-                statusText = "No Minecraft window found. Make sure Minecraft is running in windowed mode."
-            } else {
-                statusText = "Found \(windows.count) window(s). Select one to start."
+            switch await WindowFinder.findWindows() {
+            case .permissionDenied:
+                needsScreenRecordingPermission = true
+                allWindows = []
+                statusText = Self.permissionMessage
+
+            case .failed(let message):
+                needsScreenRecordingPermission = false
+                allWindows = []
+                statusText = "Could not list windows: \(message)"
+
+            case .success(let windows):
+                needsScreenRecordingPermission = false
+                allWindows = windows
+                let likely = windows.filter(\.isLikelyMinecraft)
+                if !likely.isEmpty {
+                    statusText = "Found \(likely.count) likely Minecraft window(s)."
+                } else if windows.isEmpty {
+                    statusText = "No capturable windows found."
+                } else {
+                    statusText = """
+                        No window looked like Minecraft. Pick it manually from \
+                        the full list below.
+                        """
+                }
             }
         }
     }
@@ -48,10 +78,15 @@ final class OverlayController: NSObject, ObservableObject {
 
     func start(target: TargetWindow) {
         Task {
+            // Without this, picking a second window orphans the previous
+            // overlay (an ordered-in .floating window nothing holds a
+            // reference to any more) and leaves its stream writing that
+            // window's frames into the new overlay's view.
+            if stream != nil || overlayWindow != nil { stop() }
             do {
                 try await startCapture(target: target)
                 isRunning = true
-                statusText = "Running — overlay active on \(target.title)"
+                statusText = "Running — overlay active on \(target.displayName)"
                 startWindowTracking(windowID: target.scWindow.windowID)
             } catch {
                 statusText = "Failed to start: \(error.localizedDescription)"
@@ -62,11 +97,13 @@ final class OverlayController: NSObject, ObservableObject {
     func stop() {
         trackingTimer?.invalidate()
         trackingTimer = nil
-        Task {
-            try? await stream?.stopCapture()
-            stream = nil
-            streamOutput = nil
-        }
+        // Detach the stream *before* suspending. Awaiting first would let a
+        // start() that happens during the suspension have its new stream
+        // nulled out by this teardown.
+        let outgoingStream = stream
+        stream = nil
+        streamOutput = nil
+        Task { try? await outgoingStream?.stopCapture() }
         overlayWindow?.orderOut(nil)
         overlayWindow = nil
         overlayView = nil
